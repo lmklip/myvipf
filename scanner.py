@@ -8,7 +8,7 @@ SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/conf
 
 # Настройки скорости и лимитов
 THREADS = 200
-TIMEOUT = 3.0  # Увеличиваем таймаут, учитывая возможные задержки в мобильной сети
+TIMEOUT = 5.0  # Увеличиваем таймаут до 5 секунд
 MAX_FINAL = 50  # Выдаем 50 лучших серверов
 
 # Список SNI, которые Мегафон/Yota боятся трогать (системный трафик)
@@ -54,12 +54,27 @@ def analyze_config(line):
 
 def check_alive(item):
     try:
-        # Проверяем сервер через HTTPS, увеличиваем таймаут, чтобы учесть задержки
+        # Проверка через HTTPS
         response = requests.get(f"https://{item['host']}:{item['port']}", timeout=TIMEOUT)
         if response.status_code == 200:
+            print(f"Сервер {item['host']} доступен по HTTPS")
             return item
-    except requests.exceptions.RequestException:
+        else:
+            print(f"Сервер {item['host']} вернул код {response.status_code} (не 200)")
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при подключении к серверу {item['host']}: {e}")
         return None
+
+    # Дополнительно пробуем проверить через HTTP (порт 80)
+    try:
+        response = requests.get(f"http://{item['host']}:{item['port']}", timeout=TIMEOUT)
+        if response.status_code == 200:
+            print(f"Сервер {item['host']} доступен по HTTP")
+            return item
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при подключении по HTTP к серверу {item['host']}: {e}")
+    
+    return None
 
 def main():
     print("Запуск Mega-Mixer v11.0 (Yota CFO Optimized)...")
