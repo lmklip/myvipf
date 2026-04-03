@@ -8,8 +8,8 @@ SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/conf
 
 # Настройки скорости и лимитов
 THREADS = 200
-TIMEOUT = 1.0
-MAX_FINAL = 100  # Выдаем 100 разных серверов для "лотереи"
+TIMEOUT = 3.0  # Увеличиваем таймаут, учитывая возможные задержки в мобильной сети
+MAX_FINAL = 50  # Выдаем 50 лучших серверов
 
 # Список SNI, которые Мегафон/Yota боятся трогать (системный трафик)
 TRUSTED_SNI = [
@@ -54,6 +54,7 @@ def analyze_config(line):
 
 def check_alive(item):
     try:
+        # Проверяем сервер через HTTPS, увеличиваем таймаут, чтобы учесть задержки
         response = requests.get(f"https://{item['host']}:{item['port']}", timeout=TIMEOUT)
         if response.status_code == 200:
             return item
@@ -73,28 +74,30 @@ def main():
     candidates = [analyze_config(l) for l in raw_lines if l]
     candidates = [c for c in candidates if c]
 
-    # Быстрая проверка порта
+    print(f"Найдено {len(candidates)} кандидатов после фильтрации.")
+
+    # Быстрая проверка доступности портов
     valid = []
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
         results = list(executor.map(check_alive, candidates))
         valid = [v for v in results if v]
 
-    print(f"Valid candidates: {len(valid)}")
+    print(f"Доступных серверов: {len(valid)}")
 
-    # Фильтр: 1 IP = 1 Самый лучший конфиг (убираем дубликаты портов)
+    # Фильтрация: 1 IP = 1 Самый лучший конфиг (убираем дубликаты портов)
     unique_ips = {}
     for v in valid:
         ip = v['host']
         if ip not in unique_ips or v['score'] > unique_ips[ip]['score']:
             unique_ips[ip] = v
 
-    print(f"Unique IPs: {len(unique_ips)}")
+    print(f"Уникальных IP: {len(unique_ips)}")
 
+    # Сортировка по "пробивной способности"
     final_pool = list(unique_ips.values())
-    # Сортируем по "пробивной способности"
     final_pool.sort(key=lambda x: x['score'], reverse=True)
 
-    # Берем топ-150 и из них перемешиваем 100 для ротации
+    # Берем топ-150 и из них перемешиваем 50 для ротации
     top_elite = final_pool[:150]
     if len(top_elite) > MAX_FINAL:
         final_selection = random.sample(top_elite, MAX_FINAL)
@@ -109,6 +112,7 @@ def main():
     sub_text = "\n".join([s['config'] for s in final_selection])
     encoded_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
 
+    # Записываем результат в файл
     with open("sub.txt", "w", encoding="utf-8") as f:
         f.write(encoded_sub)
 
