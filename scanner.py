@@ -1,14 +1,14 @@
-import os, requests, base64, json, urllib.parse, time, random
+import os, requests, base64, json, urllib.parse, time, socket
 from concurrent.futures import ThreadPoolExecutor
 
 # --- НАСТРОЙКИ ---
-GITHUB_USER = "lmklip"
-GITHUB_REPO = "myvipf"
+GITHUB_USER = "lmklip"; GITHUB_REPO = "myvipf"
 SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/configs/russia_whitelist.txt"
 
-# Лимиты для API Check-host (чтобы не забанили)
-CHECK_LIMIT = 25  # Проверяем только 25 самых топовых по архитектуре
-RU_NODES = ["ru1.check-host.net", "ru2.check-host.net", "md1.check-host.net"] # Москва и Спб
+# Лимиты для стабильности
+THREADS_GLOBAL = 100
+CHECK_LIMIT_RU = 30   # Уменьшим до 30 для 100% стабильности API
+THREADS_RU = 5        # Проверка по 5 штук, чтобы API не банил
 
 def extract_info(line):
     line = line.strip()
@@ -16,94 +16,107 @@ def extract_info(line):
     try:
         parsed = urllib.parse.urlparse(line)
         query = urllib.parse.parse_qs(parsed.query)
+        # Оставляем только Reality
+        if str(query.get('security', [''])[0]).lower() != "reality": return None
+        
         host, port = parsed.hostname, int(parsed.port) if parsed.port else 443
-        security = str(query.get('security', [''])[0]).lower()
         sni = str(query.get('sni', [''])[0]).lower()
         
-        if security != "reality": return None # Оставляем только Reality
-
         score = 0
         if any(d in sni for d in ["apple", "microsoft", "google", "samsung"]): score += 5000
         if "h2" in str(query.get('alpn', '')): score += 2000
         if "grpc" in str(query.get('type', '')): score += 1000
-        
         return {"host": host, "port": port, "score": score, "config": line}
     except: return None
 
-def check_via_ru_node(item):
-    """Реальная проверка доступности из России через Check-Host API"""
+def check_fast_global(item):
+    """Первичное сито: быстрая проверка порта"""
+    try:
+        with socket.create_connection((item['host'], item['port']), timeout=1.5):
+            return item
+    except: return None
+
+def check_deep_ru(item):
+    """Глубокая проверка из РФ (Check-Host API) с защитой от вылетов"""
     host_port = f"{item['host']}:{item['port']}"
     try:
-        # Создаем запрос на проверку
+        # 1. Запрос на проверку
         api_url = f"https://check-host.net/check-tcp?host={host_port}&node=ru1.check-host.net&node=ru2.check-host.net&node=md1.check-host.net"
-        headers = {'Accept': 'application/json'}
-        req = requests.get(api_url, headers=headers, timeout=10)
-        request_id = req.json().get('request_id')
+        r = requests.get(api_url, headers={'Accept': 'application/json'}, timeout=15)
+        if r.status_code != 200: return None
         
+        req_data = r.json()
+        request_id = req_data.get('request_id')
         if not request_id: return None
 
-        # Ждем 5-7 секунд, пока узлы в РФ проведут проверку
-        time.sleep(7)
+        time.sleep(10) # Даем узлам время на ответ
         
-        # Получаем результат
+        # 2. Получение результата
         res_url = f"https://check-host.net/check-result/{request_id}"
-        result = requests.get(res_url, headers=headers, timeout=10).json()
+        r_res = requests.get(res_url, timeout=15)
+        if r_res.status_code != 200: return None
         
-        # Проверяем, ответил ли хоть один российский узел (результат не должен быть None)
-        is_working_in_ru = False
+        result = r_res.json()
+        if not result: return None
+        
+        # Анализ ответа российских узлов
         for node, data in result.items():
-            if data and any(val is not None for val in data):
-                is_working_in_ru = True
-                break
-        
-        if is_working_in_ru:
-            print(f"[OK] Сервер {host_port} доступен из РФ.")
-            return item
-        else:
-            print(f"[FAIL] Сервер {host_port} недоступен из РФ.")
-            return None
+            if data and isinstance(data, list) and any(val is not None for val in data):
+                print(f"[RU OK] {host_port}")
+                return item
+        return None
     except Exception as e:
         print(f"Ошибка API для {host_port}: {e}")
         return None
 
 def main():
-    print("--- Запуск REAL PROBE Scanner v10.0 (API Check-Host) ---")
+    print("--- ЗАПУСК СКАНЕРА v10.3 (Bulletproof) ---")
     try:
-        r = requests.get(SOURCE_URL, timeout=15)
+        r = requests.get(SOURCE_URL, timeout=20)
         raw_lines = list(set(r.text.splitlines()))
-    except: return
+        print(f"Загружено: {len(raw_lines)} строк.")
+    except Exception as e:
+        print(f"Ошибка загрузки базы: {e}")
+        return
 
-    # 1. Сортируем по архитектуре и ГЕО (берем 25 лучших)
+    # ЭТАП 1: Реалити-фильтр
     candidates = [extract_info(l) for l in raw_lines if l]
     candidates = [c for c in candidates if c]
-    candidates.sort(key=lambda x: x['score'], reverse=True)
+    print(f"Reality-кандидатов: {len(candidates)}")
+
+    # ЭТАП 2: Быстрый TCP чек (Глобальный)
+    live_globally = []
+    with ThreadPoolExecutor(max_workers=THREADS_GLOBAL) as executor:
+        res_glob = list(executor.map(check_fast_global, candidates))
+        live_globally = [r for r in res_glob if r]
     
-    top_candidates = candidates[:CHECK_LIMIT]
-    print(f"Отобрано {len(top_candidates)} кандидатов для реальной проверки из РФ...")
+    live_globally.sort(key=lambda x: x['score'], reverse=True)
+    finalists = live_globally[:CHECK_LIMIT_RU]
+    print(f"Живых в мире: {len(live_globally)}. Проверка {len(finalists)} финалистов через РФ...")
 
-    # 2. Проверяем через API Check-Host
-    working_in_ru = []
-    # Делаем последовательно или небольшими группами, чтобы API не сбросил
-    for item in top_candidates:
-        res = check_via_ru_node(item)
-        if res:
-            working_in_ru.append(res)
-        time.sleep(2) # Пауза между запросами к API
+    if not finalists:
+        print("Нет живых серверов для проверки.")
+        return
 
-    if not working_in_ru:
-        print("!!! Ни один сервер не прошел проверку из России через Check-Host.")
-        # Если API подвел, отдаем топ по архитектуре как запасной вариант
-        working_in_ru = top_candidates[:10]
-    else:
-        print(f"Найдено {len(working_in_ru)} подтвержденных серверов из РФ!")
+    # ЭТАП 3: Проверка через Россию (Check-Host)
+    confirmed_in_ru = []
+    with ThreadPoolExecutor(max_workers=THREADS_RU) as executor:
+        res_ru = list(executor.map(check_deep_ru, finalists))
+        confirmed_in_ru = [r for r in res_ru if r]
 
-    # 3. Сохраняем результат
-    sub_data = base64.b64encode("\n".join([s['config'] for s in working_in_ru]).encode('utf-8')).decode('utf-8')
+    # Если через РФ ничего не нашлось, берем топ по архитектуре (чтобы файл не был пустым)
+    if not confirmed_in_ru:
+        print("РФ-узлы не подтвердили доступность. Использую запасной Топ-10.")
+        confirmed_in_ru = finalists[:10]
+
+    # Сохранение результата (Base64)
+    final_configs = [s['config'] for s in confirmed_in_ru]
+    sub_data = base64.b64encode("\n".join(final_configs).encode('utf-8')).decode('utf-8')
+    
     with open("sub.txt", "w", encoding="utf-8") as f:
-        f.write(encoded_sub) # Исправлено на sub_data
         f.write(sub_data)
     
-    print("Подписка обновлена. Используйте прямую ссылку на sub.txt.")
+    print(f"--- ГОТОВО! В подписке {len(confirmed_in_ru)} серверов. ---")
 
 if __name__ == "__main__":
     main()
