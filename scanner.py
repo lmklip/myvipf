@@ -23,48 +23,45 @@ def analyze_config(line):
     """Анализирует тип протокола и его защиту от DPI"""
     line = line.strip()
     score = 0
-    params = {}
     
     try:
         if line.startswith("vmess://"):
-            # VMess сейчас очень легко блокируется, даем низкий приоритет
+            # VMess сейчас очень легко блокируется ТСПУ
             score -= 500
             data = line.split("vmess://")[1]
             missing_padding = len(data) % 4
             if missing_padding: data += '=' * (4 - missing_padding)
             obj = json.loads(base64.b64decode(data).decode('utf-8'))
             host, port = obj.get('add'), int(obj.get('port'))
-            # Если VMess на 443 порту - чуть лучше
             if port == 443: score += 100
         else:
             parsed = urllib.parse.urlparse(line)
             query = urllib.parse.parse_qs(parsed.query)
             
-            # Извлекаем хост и порт
             host = parsed.hostname
             port = parsed.port
             if not port:
                 netloc = parsed.netloc.split('@')[-1]
                 if ':' in netloc: host, port = netloc.split(':')
-                else: port = 443 # По умолчанию
+                else: port = 443
             port = int(port)
 
-            # --- СКОРИНГ (БАЛЛЫ ЗА СТОЙКОСТЬ) ---
-            # Самый топ: VLESS + Reality
+            # --- СКОРИНГ (БАЛЛЫ ЗА СТОЙКОСТЬ К ТСПУ) ---
+            # Ищем Reality (самый топ)
             if "reality" in str(query.get('security', '')).lower():
-                score += 2000
+                score += 3000
             
-            # VLESS + Vision (XTLS)
+            # XTLS / Vision
             if "vision" in str(query.get('flow', '')).lower():
-                score += 1500
+                score += 2000
                 
-            # Маскировка под GRPC (хорошо на мобильных сетях)
+            # Маскировка под GRPC (хорошо для мобильных сетей)
             if "grpc" in str(query.get('type', '')).lower():
-                score += 800
+                score += 1000
 
-            # Стандартный TLS на 443 порту
+            # Стандартный порт 443
             if port == 443:
-                score += 300
+                score += 500
 
         return host, port, score
     except:
@@ -76,7 +73,7 @@ def check_server(config_line):
     
     try:
         start = time.perf_counter()
-        # Проверяем доступность порта
+        # Проверяем физическую доступность порта
         with socket.create_connection((host, port), timeout=TIMEOUT):
             latency = (time.perf_counter() - start) * 1000
             # Итоговый балл: Больше баллов за протокол, меньше за пинг
@@ -86,37 +83,47 @@ def check_server(config_line):
         return None
 
 def main():
-    print("Запуск DPI-resistant сканера...")
+    print("Запуск DPI-resistant сканера v2.0...")
     try:
         response = requests.get(SOURCE_URL, timeout=15)
         raw_lines = [l for l in response.text.splitlines() if l.strip()]
-    except: return
+        print(f"Загружено {len(raw_lines)} конфигов из базы.")
+    except Exception as e:
+        print(f"Ошибка загрузки базы: {e}")
+        return
 
     results = []
+    print(f"Начинаю тесты в {THREADS} потоков...")
+    
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        futures = [executor.submit(check_worker, line) for line in raw_lines] # Исправил check_worker на check_server
+        # Здесь была ошибка (check_worker), теперь исправлено на check_server
         futures = [executor.submit(check_server, line) for line in raw_lines]
         for f in futures:
             res = f.result()
-            if res: results.append(res)
+            if res:
+                results.append(res)
 
     # Сортируем: чем выше score, тем лучше сервер для обхода блокировок
     results.sort(key=lambda x: x['score'], reverse=True)
     final = results[:MAX_NODES]
 
     if not final:
-        print("Ничего не найдено."); return
+        print("К сожалению, ни один сервер не прошел проверку."); return
 
+    print(f"Отобрано {len(final)} устойчивых серверов.")
+    
+    # Кодируем в Base64 для файла подписки
     sub_text = "\n".join([r['config'] for r in final])
     encoded_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
 
     with open("sub.txt", "w", encoding="utf-8") as f:
         f.write(encoded_sub)
 
+    # Генерируем QR-код на RAW ссылку (для удобства)
     qr = qrcode.make(RAW_URL)
     qr.save("subscription_qr.png")
     
-    print(f"Обновлено! Найдено {len(final)} устойчивых серверов.")
+    print(f"Успех! Подписка обновлена. Лучший пинг: {int(final[0]['ms'])}ms")
 
 if __name__ == "__main__":
     main()
