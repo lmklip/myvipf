@@ -8,94 +8,115 @@ import qrcode
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-# --- НАСТРОЙКИ ВАШЕГО ГИТА ---
+# --- ВАШИ ДАННЫЕ ---
 GITHUB_USER = "lmklip"
 GITHUB_REPO = "myvipf"
 RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/sub.txt"
 
-# --- НАСТРОЙКИ ОПТИМИЗАЦИИ ---
+# --- НАСТРОЙКИ ФИЛЬТРАЦИИ ---
 SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/configs/russia_whitelist.txt"
 THREADS = 100
-TIMEOUT = 1.5         # Строгий отбор: только очень быстрые серверы
-MAX_FINAL_NODES = 50  # Оставляем ровно 50 лучших
+TIMEOUT = 1.0         # Только самые отзывчивые
+MAX_NODES = 50
 
-def extract_host_port(line):
+def analyze_config(line):
+    """Анализирует тип протокола и его защиту от DPI"""
     line = line.strip()
-    if not line or "://" not in line: return None
+    score = 0
+    params = {}
+    
     try:
         if line.startswith("vmess://"):
+            # VMess сейчас очень легко блокируется, даем низкий приоритет
+            score -= 500
             data = line.split("vmess://")[1]
             missing_padding = len(data) % 4
             if missing_padding: data += '=' * (4 - missing_padding)
             obj = json.loads(base64.b64decode(data).decode('utf-8'))
-            return obj.get('add'), int(obj.get('port'))
+            host, port = obj.get('add'), int(obj.get('port'))
+            # Если VMess на 443 порту - чуть лучше
+            if port == 443: score += 100
         else:
             parsed = urllib.parse.urlparse(line)
-            host, port = parsed.hostname, parsed.port
+            query = urllib.parse.parse_qs(parsed.query)
+            
+            # Извлекаем хост и порт
+            host = parsed.hostname
+            port = parsed.port
             if not port:
                 netloc = parsed.netloc.split('@')[-1]
                 if ':' in netloc: host, port = netloc.split(':')
-            return host, int(port)
-    except: return None
+                else: port = 443 # По умолчанию
+            port = int(port)
+
+            # --- СКОРИНГ (БАЛЛЫ ЗА СТОЙКОСТЬ) ---
+            # Самый топ: VLESS + Reality
+            if "reality" in str(query.get('security', '')).lower():
+                score += 2000
+            
+            # VLESS + Vision (XTLS)
+            if "vision" in str(query.get('flow', '')).lower():
+                score += 1500
+                
+            # Маскировка под GRPC (хорошо на мобильных сетях)
+            if "grpc" in str(query.get('type', '')).lower():
+                score += 800
+
+            # Стандартный TLS на 443 порту
+            if port == 443:
+                score += 300
+
+        return host, port, score
+    except:
+        return None, None, -9999
 
 def check_server(config_line):
-    hp = extract_host_port(config_line)
-    if not hp: return None
-    host, port = hp
+    host, port, proto_score = analyze_config(config_line)
+    if not host or proto_score < -1000: return None
     
-    # Вес для портов (приоритет 443 и 80 для обхода фильтров сетей)
-    priority_bonus = 0
-    if port in [443, 80, 8080, 8443]:
-        priority_bonus = 100 # Делаем их "виртуально быстрее" для сортировки
-
     try:
         start = time.perf_counter()
+        # Проверяем доступность порта
         with socket.create_connection((host, port), timeout=TIMEOUT):
             latency = (time.perf_counter() - start) * 1000
-            # Итоговый "балл" сервера: задержка минус бонус порта
-            return {"config": config_line, "latency": latency - priority_bonus, "real_ms": latency}
+            # Итоговый балл: Больше баллов за протокол, меньше за пинг
+            final_score = proto_score - latency
+            return {"config": config_line, "score": final_score, "ms": latency}
     except:
         return None
 
 def main():
-    print(f"--- ЗАПУСК ОПТИМИЗИРОВАННОГО СКАНЕРА ---")
+    print("Запуск DPI-resistant сканера...")
     try:
         response = requests.get(SOURCE_URL, timeout=15)
-        all_lines = [l for l in response.text.splitlines() if l.strip()]
-    except:
-        print("Ошибка сети"); return
+        raw_lines = [l for l in response.text.splitlines() if l.strip()]
+    except: return
 
-    print(f"Сканирую {len(all_lines)} конфигов. Цель: выбрать Топ-50...")
-    
     results = []
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        futures = [executor.submit(check_server, line) for line in all_lines]
+        futures = [executor.submit(check_worker, line) for line in raw_lines] # Исправил check_worker на check_server
+        futures = [executor.submit(check_server, line) for line in raw_lines]
         for f in futures:
             res = f.result()
             if res: results.append(res)
 
-    # Сортируем по "баллу" (учитываем и скорость, и стандартность порта)
-    results.sort(key=lambda x: x['latency'])
-    
-    # Оставляем ровно Топ-50
-    final_selection = results[:MAX_FINAL_NODES]
-    
-    if not final_selection:
-        print("!!! Не найдено серверов, отвечающих строгим критериям."); return
+    # Сортируем: чем выше score, тем лучше сервер для обхода блокировок
+    results.sort(key=lambda x: x['score'], reverse=True)
+    final = results[:MAX_NODES]
 
-    # Формируем подписку
-    print(f"Отобрано {len(final_selection)} элитных серверов.")
-    working_configs = "\n".join([r['config'] for r in final_selection])
-    encoded_sub = base64.b64encode(working_configs.encode('utf-8')).decode('utf-8')
+    if not final:
+        print("Ничего не найдено."); return
+
+    sub_text = "\n".join([r['config'] for r in final])
+    encoded_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
 
     with open("sub.txt", "w", encoding="utf-8") as f:
         f.write(encoded_sub)
 
-    # QR-код на RAW ссылку
     qr = qrcode.make(RAW_URL)
     qr.save("subscription_qr.png")
     
-    print(f"Подписка обновлена. Пинг лучших: {int(final_selection[0]['real_ms'])}ms")
+    print(f"Обновлено! Найдено {len(final)} устойчивых серверов.")
 
 if __name__ == "__main__":
     main()
