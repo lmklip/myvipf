@@ -1,14 +1,15 @@
 import os, socket, requests, base64, json, urllib.parse, time, random
 from concurrent.futures import ThreadPoolExecutor
 
-# --- ВАШИ ДАННЫЕ ---
-GITHUB_USER = "lmklip"; GITHUB_REPO = "myvipf"
+# ВАШИ ДАННЫЕ
+GITHUB_USER = "lmklip"
+GITHUB_REPO = "myvipf"
 SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/configs/russia_whitelist.txt"
 
 # Настройки скорости и лимитов
 THREADS = 200
 TIMEOUT = 1.0
-MAX_FINAL = 100 # Выдаем 100 разных серверов для "лотереи"
+MAX_FINAL = 100  # Выдаем 100 разных серверов для "лотереи"
 
 # Список SNI, которые Мегафон/Yota боятся трогать (системный трафик)
 TRUSTED_SNI = [
@@ -24,7 +25,6 @@ def analyze_config(line):
         parsed = urllib.parse.urlparse(line)
         query = urllib.parse.parse_qs(parsed.query)
         host, port = parsed.hostname, int(parsed.port) if parsed.port else 443
-        
         security = str(query.get('security', [''])[0]).lower()
         sni = str(query.get('sni', [''])[0]).lower()
         fp = str(query.get('fp', [''])[0]).lower()
@@ -48,20 +48,26 @@ def analyze_config(line):
         if "h2" in alpn: score += 1000
 
         return {"host": host, "port": port, "score": score, "config": line}
-    except: return None
+    except Exception as e:
+        print(f"Error processing config: {e}")
+        return None
 
 def check_alive(item):
     try:
-        with socket.create_connection((item['host'], item['port']), timeout=TIMEOUT):
+        response = requests.get(f"https://{item['host']}:{item['port']}", timeout=TIMEOUT)
+        if response.status_code == 200:
             return item
-    except: return None
+    except requests.exceptions.RequestException:
+        return None
 
 def main():
     print("Запуск Mega-Mixer v11.0 (Yota CFO Optimized)...")
     try:
         r = requests.get(SOURCE_URL, timeout=15)
         raw_lines = list(set(r.text.splitlines()))
-    except: return
+    except Exception as e:
+        print(f"Ошибка при скачивании конфигов: {e}")
+        return
 
     # Анализ всех строк
     candidates = [analyze_config(l) for l in raw_lines if l]
@@ -73,6 +79,8 @@ def main():
         results = list(executor.map(check_alive, candidates))
         valid = [v for v in results if v]
 
+    print(f"Valid candidates: {len(valid)}")
+
     # Фильтр: 1 IP = 1 Самый лучший конфиг (убираем дубликаты портов)
     unique_ips = {}
     for v in valid:
@@ -80,10 +88,12 @@ def main():
         if ip not in unique_ips or v['score'] > unique_ips[ip]['score']:
             unique_ips[ip] = v
 
+    print(f"Unique IPs: {len(unique_ips)}")
+
     final_pool = list(unique_ips.values())
     # Сортируем по "пробивной способности"
     final_pool.sort(key=lambda x: x['score'], reverse=True)
-    
+
     # Берем топ-150 и из них перемешиваем 100 для ротации
     top_elite = final_pool[:150]
     if len(top_elite) > MAX_FINAL:
@@ -92,7 +102,8 @@ def main():
         final_selection = top_elite
 
     if not final_selection:
-        print("Ничего не найдено."); return
+        print("Ничего не найдено.")
+        return
 
     # Склеиваем и в Base64
     sub_text = "\n".join([s['config'] for s in final_selection])
@@ -100,7 +111,7 @@ def main():
 
     with open("sub.txt", "w", encoding="utf-8") as f:
         f.write(encoded_sub)
-    
+
     print(f"УСПЕХ! В списке {len(final_selection)} уникальных защищенных узлов.")
 
 if __name__ == "__main__":
