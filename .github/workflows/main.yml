@@ -1,12 +1,12 @@
-name: Update Top 20 VPN Configs
+name: Update VPN Subscription
 
 on:
   schedule:
-    - cron: '0 */3 * * *' # Запуск каждые 3 часа
-  workflow_dispatch:      # Возможность запустить вручную кнопкой
+    - cron: '0 */6 * * *' # Запуск каждые 6 часов
+  workflow_dispatch:      # Возможность запустить вручную
 
 jobs:
-  build:
+  update-sub:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -15,10 +15,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests qrcode pillow
 
       - name: Run scanner
         run: python scanner.py
@@ -27,6 +27,6 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add top_20_configs.txt
-          git commit -m "Update working configs: $(date)" || exit 0
+          git add sub.txt subscription_qr.png
+          git commit -m "Auto-update: Found working nodes" || exit 0
           git push
