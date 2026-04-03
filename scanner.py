@@ -1,4 +1,8 @@
-import requests, base64, urllib.parse, random
+import requests
+import base64
+import urllib.parse
+import random
+import sys
 
 SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/configs/russia_whitelist.txt"
 
@@ -10,6 +14,14 @@ TRUSTED_SNI = [
     "connectivitycheck.gstatic.com", "graph.facebook.com"
 ]
 
+
+def safe_get(q, key):
+    try:
+        return q.get(key, [""])[0].lower()
+    except:
+        return ""
+
+
 def analyze(line):
     if not line.startswith("vless://"):
         return None
@@ -18,65 +30,92 @@ def analyze(line):
         p = urllib.parse.urlparse(line)
         q = urllib.parse.parse_qs(p.query)
 
-        security = q.get("security", [""])[0]
-        sni = q.get("sni", [""])[0]
-        fp = q.get("fp", [""])[0]
-        flow = q.get("flow", [""])[0]
-        net = q.get("type", [""])[0]
+        security = safe_get(q, "security")
+        sni = safe_get(q, "sni")
+        fp = safe_get(q, "fp")
+        flow = safe_get(q, "flow")
+        net = safe_get(q, "type")
 
         score = 0
 
-        # 💥 ОСНОВА (самое важное)
+        # 🔥 ОСНОВА
         if security == "reality":
             score += 5000
 
         if "vision" in flow:
             score += 3000
 
-        # 💥 SNI (критично)
+        # 🔥 SNI
         if any(x in sni for x in TRUSTED_SNI):
             score += 4000
 
-        # 💥 transport
+        # 🔥 transport
         if net == "grpc":
             score += 2000
-        if net == "ws":
+        elif net == "ws":
             score += 1000
 
-        # 💥 fingerprint
+        # 🔥 fingerprint
         if fp in ["chrome", "safari", "edge"]:
             score += 1500
 
+        # минимальный порог (важно!)
+        if score < 3000:
+            return None
+
         return (score, line)
 
-    except:
+    except Exception:
         return None
 
 
 def main():
-    print("smart filter mode (без фейковых проверок)")
+    print("=== SMART VLESS FILTER START ===")
 
-    r = requests.get(SOURCE_URL)
+    try:
+        r = requests.get(SOURCE_URL, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        print("Ошибка загрузки:", e)
+        sys.exit(1)
+
     lines = list(set(r.text.splitlines()))
 
-    parsed = [analyze(l) for l in lines]
-    parsed = [p for p in parsed if p]
+    print(f"Всего строк: {len(lines)}")
 
-    # сортировка
-    parsed.sort(reverse=True)
+    parsed = []
+    for l in lines:
+        res = analyze(l)
+        if res:
+            parsed.append(res)
 
-    # берём топ 200 и мешаем
+    print(f"После фильтра: {len(parsed)}")
+
+    if not parsed:
+        print("НЕТ подходящих конфигов")
+        sys.exit(1)
+
+    # сортировка по качеству
+    parsed.sort(key=lambda x: x[0], reverse=True)
+
+    # берем топ 200
     top = parsed[:200]
 
+    # случайные 50 из лучших
     final = random.sample(top, min(MAX_FINAL, len(top)))
 
     result = "\n".join([x[1] for x in final])
     encoded = base64.b64encode(result.encode()).decode()
 
-    with open("sub.txt", "w") as f:
-        f.write(encoded)
+    try:
+        with open("sub.txt", "w", encoding="utf-8") as f:
+            f.write(encoded)
+    except Exception as e:
+        print("Ошибка записи файла:", e)
+        sys.exit(1)
 
-    print(f"готово: {len(final)} серверов")
+    print(f"ГОТОВО: {len(final)} серверов сохранено в sub.txt")
+
 
 if __name__ == "__main__":
     main()
