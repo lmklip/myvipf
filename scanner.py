@@ -1,77 +1,82 @@
-import requests
+import os
 import socket
-import time
-import re
-import urllib.parse
+import requests
 import base64
 import json
+import urllib.parse
+import qrcode
+import time
 from concurrent.futures import ThreadPoolExecutor
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ ВАШЕГО ГИТА ---
+GITHUB_USER = "lmklip"
+GITHUB_REPO = "myvipf"
+RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/sub.txt"
+
+# --- НАСТРОЙКИ СКАНЕРА ---
 SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/configs/russia_whitelist.txt"
-OUTPUT_FILE = "top_20_configs.txt"
-MAX_WORKERS = 100  # Скорость сканирования (количество потоков)
-TIMEOUT = 3.0      # Таймаут ожидания ответа
+THREADS = 100
+TIMEOUT = 2.0
 
-def parse_vmess(config):
-    try:
-        data = config.split("vmess://")[1]
-        decoded = base64.b64decode(data).decode('utf-8')
-        obj = json.loads(decoded)
-        return obj.get('add'), int(obj.get('port'))
-    except: return None
-
-def get_host_port(line):
+def extract_host_port(line):
     line = line.strip()
-    if not line: return None
-    if line.startswith("vmess://"):
-        return parse_vmess(line)
+    if not line or "://" not in line: return None
     try:
-        parsed = urllib.parse.urlparse(line)
-        if parsed.hostname and parsed.port:
-            return parsed.hostname, parsed.port
+        if line.startswith("vmess://"):
+            data = line.split("vmess://")[1]
+            missing_padding = len(data) % 4
+            if missing_padding: data += '=' * (4 - missing_padding)
+            obj = json.loads(base64.b64decode(data).decode('utf-8'))
+            return obj.get('add'), int(obj.get('port'))
+        else:
+            parsed = urllib.parse.urlparse(line)
+            host, port = parsed.hostname, parsed.port
+            if not port:
+                netloc = parsed.netloc.split('@')[-1]
+                if ':' in netloc: host, port = netloc.split(':')
+            return host, int(port)
     except: return None
 
 def check_server(config_line):
-    target = get_host_port(config_line)
-    if not target:
-        return None
-    
-    host, port = target
-    start_time = time.perf_counter()
+    hp = extract_host_port(config_line)
+    if not hp: return None
+    host, port = hp
     try:
-        # Проверка реальной доступности порта (TCP Handshake)
+        start = time.perf_counter()
         with socket.create_connection((host, port), timeout=TIMEOUT):
-            delay = (time.perf_counter() - start_time) * 1000
-            return {"line": config_line, "delay": delay}
-    except:
-        return None
+            latency = (time.perf_counter() - start) * 1000
+            return {"config": config_line, "latency": latency}
+    except: return None
 
 def main():
-    print("Загрузка конфигов...")
-    raw_data = requests.get(SOURCE_URL).text.splitlines()
+    print(f"Загрузка базы конфигов...")
+    response = requests.get(SOURCE_URL, timeout=15)
+    all_lines = [l for l in response.text.splitlines() if l.strip()]
     
+    print(f"Тестирую {len(all_lines)} серверов...")
     results = []
-    print(f"Сканирование {len(raw_data)} серверов в {MAX_WORKERS} потоков...")
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Запускаем проверку всех строк параллельно
-        future_to_config = {executor.submit(check_server, line): line for line in raw_data}
-        for future in future_to_config:
-            res = future.result()
-            if res:
-                results.append(res)
+    with ThreadPoolExecutor(max_workers=THREADS) as executor:
+        futures = [executor.submit(check_server, line) for line in all_lines]
+        for f in futures:
+            res = f.result()
+            if res: results.append(res)
 
-    # Сортируем по задержке (от меньшей к большей)
-    results.sort(key=lambda x: x['delay'])
+    results.sort(key=lambda x: x['latency'])
     
-    # Берем топ 20
-    top_20 = [r['line'] for r in results[:20]]
+    # Формируем файл подписки (Base64)
+    # Берем ВСЕ рабочие (в подписке нет лимита на размер)
+    working_configs = "\n".join([r['config'] for r in results])
+    encoded_sub = base64.b64encode(working_configs.encode('utf-8')).decode('utf-8')
+
+    with open("sub.txt", "w", encoding="utf-8") as f:
+        f.write(encoded_sub)
+
+    # Генерируем QR-код на ссылку RAW
+    qr = qrcode.make(RAW_URL)
+    qr.save("subscription_qr.png")
     
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(top_20))
-    
-    print(f"Готово! Найдено рабочих: {len(results)}. Топ-20 записаны в {OUTPUT_FILE}")
+    print(f"Готово! Найдено рабочих: {len(results)}")
+    print(f"Ссылка на подписку: {RAW_URL}")
 
 if __name__ == "__main__":
     main()
