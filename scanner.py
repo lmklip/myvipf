@@ -9,17 +9,14 @@ SOURCE_URL = "https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/conf
 MAX_FINAL = 50
 
 TRUSTED_SNI = [
-    "swscan.apple.com", "gateway.icloud.com", "itunes.apple.com",
-    "updates.samsung.com", "download.windowsupdate.com", "dl.google.com",
-    "connectivitycheck.gstatic.com", "graph.facebook.com"
+    "apple.com", "icloud.com", "itunes.apple.com",
+    "windowsupdate.com", "dl.google.com",
+    "gstatic.com", "facebook.com"
 ]
 
 
 def safe_get(q, key):
-    try:
-        return q.get(key, [""])[0].lower()
-    except:
-        return ""
+    return q.get(key, [""])[0].lower()
 
 
 def analyze(line):
@@ -30,6 +27,10 @@ def analyze(line):
         p = urllib.parse.urlparse(line)
         q = urllib.parse.parse_qs(p.query)
 
+        host = p.hostname
+        if not host:
+            return None
+
         security = safe_get(q, "security")
         sni = safe_get(q, "sni")
         fp = safe_get(q, "fp")
@@ -38,39 +39,35 @@ def analyze(line):
 
         score = 0
 
-        # 🔥 ОСНОВА
         if security == "reality":
-            score += 5000
+            score += 4000
 
         if "vision" in flow:
             score += 3000
 
-        # 🔥 SNI
         if any(x in sni for x in TRUSTED_SNI):
-            score += 4000
+            score += 3000
 
-        # 🔥 transport
         if net == "grpc":
-            score += 2000
+            score += 1500
         elif net == "ws":
+            score += 800
+
+        if fp in ["chrome", "safari", "edge"]:
             score += 1000
 
-        # 🔥 fingerprint
-        if fp in ["chrome", "safari", "edge"]:
-            score += 1500
+        return {
+            "score": score,
+            "host": host,
+            "line": line
+        }
 
-        # минимальный порог (важно!)
-        if score < 3000:
-            return None
-
-        return (score, line)
-
-    except Exception:
+    except:
         return None
 
 
 def main():
-    print("=== SMART VLESS FILTER START ===")
+    print("=== ANTI-DUP SMART FILTER ===")
 
     try:
         r = requests.get(SOURCE_URL, timeout=15)
@@ -80,8 +77,7 @@ def main():
         sys.exit(1)
 
     lines = list(set(r.text.splitlines()))
-
-    print(f"Всего строк: {len(lines)}")
+    print("Всего строк:", len(lines))
 
     parsed = []
     for l in lines:
@@ -89,32 +85,44 @@ def main():
         if res:
             parsed.append(res)
 
-    print(f"После фильтра: {len(parsed)}")
+    print("После анализа:", len(parsed))
 
     if not parsed:
-        print("НЕТ подходящих конфигов")
+        print("ПУСТО")
         sys.exit(1)
 
-    # сортировка по качеству
-    parsed.sort(key=lambda x: x[0], reverse=True)
+    # 🔥 УБИРАЕМ ДУБЛИКАТЫ ПО IP
+    unique = {}
+    for item in parsed:
+        ip = item["host"]
+        if ip not in unique or item["score"] > unique[ip]["score"]:
+            unique[ip] = item
 
-    # берем топ 200
-    top = parsed[:200]
+    pool = list(unique.values())
+    print("Уникальных IP:", len(pool))
 
-    # случайные 50 из лучших
-    final = random.sample(top, min(MAX_FINAL, len(top)))
+    # сортировка
+    pool.sort(key=lambda x: x["score"], reverse=True)
 
-    result = "\n".join([x[1] for x in final])
+    # берем ТОЛЬКО верхнюю часть, но не маленькую
+    top = pool[:300]
+
+    # 🔥 СИЛЬНАЯ РАНДОМИЗАЦИЯ
+    random.shuffle(top)
+
+    final = top[:min(MAX_FINAL, len(top))]
+
+    if not final:
+        print("НЕТ РЕЗУЛЬТАТА")
+        sys.exit(1)
+
+    result = "\n".join([x["line"] for x in final])
     encoded = base64.b64encode(result.encode()).decode()
 
-    try:
-        with open("sub.txt", "w", encoding="utf-8") as f:
-            f.write(encoded)
-    except Exception as e:
-        print("Ошибка записи файла:", e)
-        sys.exit(1)
+    with open("sub.txt", "w", encoding="utf-8") as f:
+        f.write(encoded)
 
-    print(f"ГОТОВО: {len(final)} серверов сохранено в sub.txt")
+    print(f"ГОТОВО: {len(final)} серверов")
 
 
 if __name__ == "__main__":
